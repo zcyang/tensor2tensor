@@ -1,6 +1,6 @@
 """Utilities for VQA data sets."""
 # some functions are copied and modified from
-# vgg_preprocessing and inception_preprocessing functions in the folder 
+# vgg_preprocessing and inception_preprocessing in 
 # models/research/slim/preprocessing/
 
 from __future__ import absolute_import

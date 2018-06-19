@@ -160,9 +160,9 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
 
   def generate_data(self, data_dir, tmp_dir, task_id=-1):
     generator_utils.generate_dataset_and_shuffle(
-      self.generator(data_dir, tmp_dir, True),
+      self.generator(data_dir, tmp_dir, problem.DatasetSplit.TRAIN),
       self.training_filepaths(data_dir, self.train_shards, shuffled=False),
-      self.generator(data_dir, tmp_dir, False),
+      self.generator(data_dir, tmp_dir, problem.DatasetSplit.EVAL),
       self.dev_filepaths(data_dir, self.dev_shards, shuffled=False))
 
 @registry.register_problem
@@ -211,4 +211,5 @@ class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
 
   def generator(self, data_dir, tmp_dir, dataset_split):
     datasets = self.source_data_files(dataset_split)
-    # return vqa_v2_generator()
+    return vqa_v2_generator(data_dir, tmp_dir, datasets,
+                            self.vocab_filename, self.label_filename)
