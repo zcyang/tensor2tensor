@@ -37,16 +37,66 @@ def _get_vqa_v2_dataset(directory):
   with tarfile.open(annotation_file, "r:gz") as annotation_tar:
     annotation_tar.extractall(directory)
 
+def vqa_v2_generator(data_dir,
+                     tmp_dir,
+                     datasets,
+                     vocab_filename,
+                     label_filename,
+                     eos_list=None):
+
+  eos_list = [1] if eos_list is None else eos_list
+  _get_vqa_v2_dataset(tmp_dir)
+  vocab_path = os.path.join(data_dir, vocab_filename)
+  if not tf.gfile.Exists(vocab_path):
+    vocab_tmp_path = os.path.join(tmp_dir, vocab_filename)
+    tf.gfile.Copy(vocab_tmp_path, vocab_path)
+    with tf.gfile.GFile(vocab_path, mode="r") as f:
+      vocab_data = "<pad>\n<EOS>\n" + f.read() + "UNK\n"
+    with tf.gfile.GFile(token_path, mode="w") as f:
+      f.write(vocab_data)
+  label_path = os.path.join(data_dir, label_filename)
+  if not tf.gfile.Exists(label_path):
+    label_tmp_path = os.path.join(tmp_dir, label_filename)
+    tf.gfile.Copy(label_tmp_path, label_path)
+
+  vocab_encoder = text_encoder.TokenTextEncoder(vocab_path)
+  label_encoder = text_encoder.ClassLabelEncoder(label_path)
+
+  prefix, annotation_file = datasets
+  annotation_json = io.open(annotation_file)
+  random.shuffle(annotation_json)
+  annotation_count = len(annotation_json)
+  tf.logging.info("Processing %d annotations for vqa v2" %(annotation_count))
+  for image in annotation_json:
+    image_id = image["image_id"]
+    question = vocab_encoder.encode(image["question"]) + eos_list
+    answer = [label_encoder.encode(ans) for ans in image["answer"]]
+    image_filename = "COCO_" + prefix + str(image_id).zfill(12) + ".jpg"
+    image_filapath = os.path.join(tmp_dir, prefix, image_filename)
+    with tf.gfile.OPen(image_filepath, "r") as f:
+      encoded_image_data = f.read()
+      yield {
+        "image/encoded": [encoded_image_data],
+        "image/format": ["jpeg"]
+        "image/image_id": [image_id],
+        "image/question_id": [image["question_id"]],
+        "image/question": question,
+        "image/answer": answer,
+      }
 
 class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
   """Base class for image question answer problem."""
+
+  @property
+  def source_data_files(self, dataset_split):
+    raise NotImplementedError()
 
   @property
   def target_space_id(self):
     raise NotImplementedError()
 
   @property
-  def question_vocab_size(self):
+  def vocab_size(self):
     raise NotImplementedError
 
   @property
@@ -67,6 +117,9 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
 
   @property
   def dev_shards(self):
+    raise NotImplementedError()
+
+  def generator(self, data_dir, tmp_dir, dataset_split):
     raise NotImplementedError()
 
   def example_reading_spec(self):
@@ -115,21 +168,47 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
 @registry.register_problem
 class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
   """VQA V2, 10k question vocab, 3k answer label."""
+  _VQA_V2_TRAIN_DATASETS = [
+    [("train2014", "train2014_annotations.json")]
+  ]
+  _VQA_V2_DEV_DATASETS = [
+    [("val2014", "val2014_annotations.json")]
+  ]
+  _VQA_V2_TEST_DATASETS = [
+    [("test2014", "test2014_annotations.json")]
+  ]
+
+  def source_data_files(self, dataset_split):
+    train = dataset_split == problem.DatasetSplit.TRAIN
+    return _VQA_V2_TRAIN_DATASETS if train else _VQA_V2_DEV_DATASETS
+
+  def target_space_id(self):
+    return problem.SpaceID.GENERIC
 
   @property
-  def question_vocab_size(self):
+  def vocab_size(self):
     return 10000
 
   @property
-  def answer_num_classes(self):
+  def num_classes(self):
     return 3000
 
   @property
-  def question_vocab_fileame(self):
+  def vocab_fileame(self):
     return "question.vocab.%d" % self.question_vocab_size
 
   @property
-  def answer_label_filename(self):
-    return "answer.label.%d" % self.answer_num_classes
+  def label_filename(self):
+    return "answer.label.%d" % self.num_classes
 
+  @property
+  def train_shards(self):
+    return 100
 
+  @property
+  def dev_shards(self):
+    return 1
+
+  def generator(self, data_dir, tmp_dir, dataset_split):
+    datasets = self.source_data_files(dataset_split)
+    # return vqa_v2_generator()
