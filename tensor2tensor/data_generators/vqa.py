@@ -4,13 +4,18 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import io
+import json
 import os
+import random
 import tarfile
 import zipfile
 
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import image_utils
+from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
+from tensor2tensor.google.data_generators import vqa_utils
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
@@ -37,13 +42,14 @@ def _get_vqa_v2_dataset(directory):
   with tarfile.open(annotation_file, "r:gz") as annotation_tar:
     annotation_tar.extractall(directory)
 
+
 def vqa_v2_generator(data_dir,
                      tmp_dir,
                      datasets,
                      vocab_filename,
                      label_filename,
                      eos_list=None):
-
+  """vqa v2 generator."""
   eos_list = [1] if eos_list is None else eos_list
   _get_vqa_v2_dataset(tmp_dir)
   vocab_path = os.path.join(data_dir, vocab_filename)
@@ -52,7 +58,7 @@ def vqa_v2_generator(data_dir,
     tf.gfile.Copy(vocab_tmp_path, vocab_path)
     with tf.gfile.GFile(vocab_path, mode="r") as f:
       vocab_data = "<pad>\n<EOS>\n" + f.read() + "UNK\n"
-    with tf.gfile.GFile(token_path, mode="w") as f:
+    with tf.gfile.GFile(vocab_path, mode="w") as f:
       f.write(vocab_data)
   label_path = os.path.join(data_dir, label_filename)
   if not tf.gfile.Exists(label_path):
@@ -63,7 +69,7 @@ def vqa_v2_generator(data_dir,
   label_encoder = text_encoder.ClassLabelEncoder(label_path)
 
   prefix, annotation_file = datasets
-  annotation_json = io.open(annotation_file)
+  annotation_json = json.load(io.open(annotation_file))
   random.shuffle(annotation_json)
   annotation_count = len(annotation_json)
   tf.logging.info("Processing %d annotations for vqa v2" %(annotation_count))
@@ -72,17 +78,18 @@ def vqa_v2_generator(data_dir,
     question = vocab_encoder.encode(image["question"]) + eos_list
     answer = [label_encoder.encode(ans) for ans in image["answer"]]
     image_filename = "COCO_" + prefix + str(image_id).zfill(12) + ".jpg"
-    image_filapath = os.path.join(tmp_dir, prefix, image_filename)
+    image_filepath = os.path.join(tmp_dir, prefix, image_filename)
     with tf.gfile.OPen(image_filepath, "r") as f:
       encoded_image_data = f.read()
       yield {
-        "image/encoded": [encoded_image_data],
-        "image/format": ["jpeg"]
-        "image/image_id": [image_id],
-        "image/question_id": [image["question_id"]],
-        "image/question": question,
-        "image/answer": answer,
+          "image/encoded": [encoded_image_data],
+          "image/format": ["jpeg"],
+          "image/image_id": [image_id],
+          "image/question_id": [image["question_id"]],
+          "image/question": question,
+          "image/answer": answer,
       }
+
 
 class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
   """Base class for image question answer problem."""
@@ -124,7 +131,7 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
 
   def example_reading_spec(self):
     data_fields, data_items_to_decoders = (
-      super(image_utils.ImageProblem, self).example_reading_spec())
+        super(image_utils.ImageProblem, self).example_reading_spec())
     data_fields["image/image_id"] = tf.FixedLenFeature((), tf.int64)
     data_fields["image/question_id"] = tf.FixedLenFeature((), tf.int64)
     data_fields["image/question"] = tf.FixedLenSequenceFeature((), tf.int64)
@@ -132,10 +139,12 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
     # TODO(zichaoy): maybe add answer len?
     # depends on the implementation of multiclass modality
 
-    data_items_to_decoders["question"] \
-      = tf.contrib.slim.tf.example_decoder.Tensor("image/question")
-    data_items_to_decoders["targets"] \
-      = tf.contrib.slim.tfexample_decoder.Tensor("image/answer")
+    data_items_to_decoders[
+        "question"] = tf.contrib.slim.tf.example_decoder.Tensor(
+            "image/question")
+    data_items_to_decoders[
+        "targets"] = tf.contrib.slim.tfexample_decoder.Tensor(
+            "image/answer")
     return data_fields, data_items_to_decoders
 
   def feature_encoders(self, data_dir):
@@ -144,7 +153,7 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
     question_encoder = text_encoder.TextTokenEncoder(vocab_file)
     label_file = os.path.join(data_dir, self.label_filename)
     target_encoder = text_encoder.ClassLabelEncoder(
-      class_labels_fname=label_file)
+        class_labels_fname=label_file)
     return {"inputs": input_encoder,
             "question": question_encoder,
             "targets": target_encoder}
@@ -152,35 +161,38 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
   def hparams(self, defaults, unused_model_hparams):
     p = defaults
     encoder = self._encoders["question"]
-    p.input_modality = {"inputs": (registry.Modalities.IMAGE, 256),
-                        "question" (registry.Modalities.SYMBOL, encoder.vocab_size)}
+    p.input_modality = {"inputs":
+                        (registry.Modalities.IMAGE, 256),
+                        "question":
+                        (registry.Modalities.SYMBOL, encoder.vocab_size)}
     # TODO(zichaoy): set batch_size multiplier, loss multiplier ?
     p.input_space_id = problem.SpaceID.IMAGE  # multiple input features?
     p.target_space_id = self.target_space_id
 
   def generate_data(self, data_dir, tmp_dir, task_id=-1):
     generator_utils.generate_dataset_and_shuffle(
-      self.generator(data_dir, tmp_dir, problem.DatasetSplit.TRAIN),
-      self.training_filepaths(data_dir, self.train_shards, shuffled=False),
-      self.generator(data_dir, tmp_dir, problem.DatasetSplit.EVAL),
-      self.dev_filepaths(data_dir, self.dev_shards, shuffled=False))
+        self.generator(data_dir, tmp_dir, problem.DatasetSplit.TRAIN),
+        self.training_filepaths(data_dir, self.train_shards, shuffled=False),
+        self.generator(data_dir, tmp_dir, problem.DatasetSplit.EVAL),
+        self.dev_filepaths(data_dir, self.dev_shards, shuffled=False))
+
 
 @registry.register_problem
 class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
   """VQA V2, 10k question vocab, 3k answer label."""
   _VQA_V2_TRAIN_DATASETS = [
-    [("train2014", "train2014_annotations.json")]
+      [("train2014", "train2014_annotations.json")]
   ]
   _VQA_V2_DEV_DATASETS = [
-    [("val2014", "val2014_annotations.json")]
+      [("val2014", "val2014_annotations.json")]
   ]
   _VQA_V2_TEST_DATASETS = [
-    [("test2014", "test2014_annotations.json")]
+      [("test2014", "test2014_annotations.json")]
   ]
 
   def source_data_files(self, dataset_split):
     train = dataset_split == problem.DatasetSplit.TRAIN
-    return _VQA_V2_TRAIN_DATASETS if train else _VQA_V2_DEV_DATASETS
+    return self._VQA_V2_TRAIN_DATASETS if train else self._VQA_V2_DEV_DATASETS
 
   def target_space_id(self):
     return problem.SpaceID.GENERIC
@@ -208,6 +220,12 @@ class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
   @property
   def dev_shards(self):
     return 1
+
+  def preprocess_example(self, example, mode, hparams):
+    # TODO(zichaoy) hparams? problem_hparams or model hparmas??
+    image = example["inputs"]
+    return vqa_utils.vqa_v2_preprocess_image(image, hparams.height,
+                                             hparams.width, mode)
 
   def generator(self, data_dir, tmp_dir, dataset_split):
     datasets = self.source_data_files(dataset_split)

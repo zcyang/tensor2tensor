@@ -1,15 +1,17 @@
 """Utilities for VQA data sets."""
-# some functions are copied and modified from
-# vgg_preprocessing and inception_preprocessing in 
-# models/research/slim/preprocessing/
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import tensorflow as tf
+
 from tensorflow.python.ops import control_flow_ops
 
-import tensorflow as tf
+# some functions are copied and modified from
+# vgg_preprocessing and inception_preprocessing in
+# models/research/slim/preprocessing/
+
 
 def _smallest_size_at_least(height, width, smallest_side):
   """Computes new shape with the smallest side equal to `smallest_side`.
@@ -33,12 +35,13 @@ def _smallest_size_at_least(height, width, smallest_side):
   width = tf.to_float(width)
   smallest_side = tf.to_float(smallest_side)
 
-  scale = tf.cond(tf.greater(height, width),
-                  lambda: smallest_side / width,
-                  lambda: smallest_side / height)
+  scale = tf.cond(
+      tf.greater(height, width), lambda: smallest_side / width,
+      lambda: smallest_side / height)
   new_height = tf.to_int32(height * scale)
   new_width = tf.to_int32(width * scale)
   return new_height, new_width
+
 
 def _aspect_preserving_resize(image, smallest_side):
   """Resize images preserving the original aspect ratio.
@@ -59,27 +62,30 @@ def _aspect_preserving_resize(image, smallest_side):
   new_height, new_width = _smallest_size_at_least(height, width, smallest_side)
   image = tf.expand_dims(image, 0)
   resized_image = tf.image.resize_images(
-    image, size=[new_height, new_width], method=tf.image.ResizeMethod.BICUBIC)
+      image, size=[new_height, new_width], method=tf.image.ResizeMethod.BICUBIC)
 
   resized_image = tf.squeeze(resized_image)
   resized_image.set_shape([None, None, 3])
   return resized_image
+
 
 def _flip(image):
   """Random horizontal image flip."""
   image = tf.image.random_flip_left_right(image)
   return image
 
+
 def _distort_color(image, color_ordering=0, scope=None):
   """Distort the color of a Tensor image.
+
   Each color distortion is non-commutative and thus ordering of the color ops
   matters. Ideally we would randomly permute the ordering of the color ops.
   Rather then adding that level of complication, we select a distinct ordering
   of color ops for each preprocessing thread.
+
   Args:
     image: 3-D Tensor containing single image in [0, 1].
     color_ordering: Python int, a type of distortion (valid values: 0-3).
-    fast_mode: Avoids slower ops (random_hue and random_contrast)
     scope: Optional scope for name_scope.
   Returns:
     3-D Tensor color-distorted image on range [0, 1]
@@ -113,8 +119,10 @@ def _distort_color(image, color_ordering=0, scope=None):
     # The random_* ops do not necessarily clamp.
     return tf.clip_by_value(image, 0.0, 1.0)
 
+
 def _apply_with_random_selector(x, func, num_cases):
   """Computes func(x, sel), with sel sampled from [0...num_cases-1].
+
   Args:
     x: input Tensor.
     func: Python function to apply.
@@ -123,25 +131,29 @@ def _apply_with_random_selector(x, func, num_cases):
   Returns:
     The result of func(x, sel), where func receives the value of the
     selector as a python integer, but sel is sampled dynamically.
-        """
+  """
   sel = tf.random_uniform([], maxval=num_cases, dtype=tf.int32)
   # Pass the real x only to one of the func calls.
   return control_flow_ops.merge([
-    func(control_flow_ops.switch(x, tf.equal(sel, case))[1], case)
-    for case in range(num_cases)])[0]
+      func(control_flow_ops.switch(x, tf.equal(sel, case))[1], case)
+      for case in range(num_cases)
+  ])[0]
 
-def vqa_v2_preprocess_image(image,
-                            height,
-                            width,
-                            resize_side=512,
-                            distort=True,
-                            is_training=True
-                            scope=None,):
+
+def vqa_v2_preprocess_image(
+    image,
+    height,
+    width,
+    mode,
+    resize_side=512,
+    distort=True,
+):
+  """vqa v2 preprocess image."""
   image = tf.image.convert_image_dtype(image, dtype=tf.float32)
   assert resize_side > 0
   if resize_side:
     image = _aspect_preserving_resize(image, resize_side)
-  if is_training:
+  if mode == tf.estimator.ModeKeys.TRAIN:
     image = tf.random_crop(image, [height, width, 3])
   else:
     # Central crop, assuming resize_height > height, resize_width > width.
@@ -151,17 +163,14 @@ def vqa_v2_preprocess_image(image,
 
   image = _flip(image)
 
-  if is_training and distort:
+  if mode == tf.estimator.ModeKeys.TRAIN and distort:
     num_distort_cases = 4
+    # pylint: disable=unnecessary-lambda
     image = _apply_with_random_selector(
-      image,
-      lambda x, ordering: _distort_color(x, ordering),
-      num_cases=num_distort_cases)
+        image, lambda x, ordering: _distort_color(x, ordering),
+        num_cases=num_distort_cases)
 
   image = tf.subtract(image, 0.5)
   image = tf.multiply(image, 2.0)
 
   return image
-
-
-
