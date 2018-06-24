@@ -19,10 +19,19 @@ class AttentionBaseline(t2t_model.T2TModel):
   def __init__(self, *args, **kwargs):
     super(AttentionBaseline, self).__init__(*args, **kwargs)
 
-
   def body(self, features):
     hp = self.hparams
+    image_feat = image_embdding(features["inputs"],
+                                trainable=hp.train_resnet,
+                                is_training= hp.mode==tf.estimator.ModeKeys.TRAIN)
 
+    query = question_encoder(features["question"], hp)
+    image_ave = attn(image_feat, query, hp)
+
+    image_question = tf.concatenate([image_ave, query], axis=1)
+    output = mlp(image_question, hp)
+
+    return output
 
 def image_embedding(images,
                     model_fn=resnet_v2_152,
@@ -79,32 +88,66 @@ def _get_rnn_cell(hparams):
   elif hparams.rnn_type == "lstm_layernorm":
     rnn_cell = tf.contrib.rnn.LayerNormBasicLSTMCell
   return tf.contrib.rnn.DropoutWrapper(
-      rnn_cell(hparmas.hidden_size),
-      output_keep_prob=1.0 - hparams.rnn_output_dropout)
+      rnn_cell(hparams.hidden_size),
+      output_keep_prob=1.0 - hparams.dropout)
 
 def question_encoder(question, hparams, name="encoder"):
   """Question encoder, run LSTM encoder and get the last output as encoding."""
-  question = common_layers.flatten4d3d(question)
-  padding = common_attention.embedding_to_padding(question)
-  length = common_attention.padding_to_length(padding)
+  with tf.variable_scope(name, "encoder", values=[question]) as scope:
+    question = common_layers.flatten4d3d(question)
+    padding = common_attention.embedding_to_padding(question)
+    length = common_attention.padding_to_length(padding)
 
-  rnn_layer = [ _get_rnn_cell(hparams)
+    rnn_layer = [ _get_rnn_cell(hparams)
                 for _ in range(hparams.num_rnn_layers)]
-  rnn_multi_cell = tf.contrib.rnn.MultiRNNCell(layers)
-  outputs, state = tf.nn.dynamic_rnn(rnn_multi_cell, question, length)
+    rnn_multi_cell = tf.contrib.rnn.MultiRNNCell(layers)
+    outputs, state = tf.nn.dynamic_rnn(rnn_multi_cell, question, length)
 
-  batch_size = common_layers.shape_list(x)[0]
-  row_indices = tf.range(batch_size)
-  indices =  tf.transpose([row_indices, length])
-  last_output = tf.gather_nd(outputs, indices)
+    batch_size = common_layers.shape_list(x)[0]
+    row_indices = tf.range(batch_size)
+    indices = tf.transpose([row_indices, length])
+    last_output = tf.gather_nd(outputs, indices)
 
   return last_output
 
+def attn(image_feat, query, hparams, name="attn"):
+  with tf.variable_scope(name, "attn", values=[image_feat, query]) as scope:
+    attn_dim  = hparams.attn_dim
+    num_glimps = hparams.num_glimps
+    N, H, W, C = image_feat.get_shape().as_list()
+    image_feat = common_layers.flatten4d3d(image_feat)
+    query = tf.expand_dims(query, 1)
+    image_proj = common_attention.compute_attention_component(
+      image_feat, attn_dim, name="image_proj")
+    query_proj = common_attention.compute_attention_component(
+      query, attn_dim, name="query_proj")
+    h = tf.nn.relu(image_proj + query_proj)
+    h_proj = common_attention.compute_attention_component(
+      h_proj, num_glimps, name="h_proj")
+    p = tf.nn.softmax(h_proj, dim=1)
+    image_ave = tf.matmul(image_feat, p, transpose_a=True)
+    image_ave = tf.reshape(image_ave, [N, C*num_glimps])
+
+    return image_ave
+
+def mlp(feature, hparams, name="mlp"):
+  with tf.variable_scope(name, "mlp", values=[feature]) as scope:
+    num_mlp_layer = hparams.num_mlp_layer
+    mlp_dim = hparams.mlp_dim
+    for i in range(num_mlp_layer):
+      feature = common_layers.dense(feature, mlp_dim, activation=tf.relu)
+      feature = common_layers.dropout_with_broadcast_dims(
+        x, keep_prob=1-hparams.dropout, name="layer_%i"%(i))
+    return feature
 
 def vqa_attention_base():
   hparams = common_hparams.basic_hparams1()
+  hparams.dropout = 0.5
 
   # add new hparams
   hparmas.add_hparams("rnn_type", "lstm_layernorm")
-  hparmas.add_hparams("rnn_output_dropout", 0.5)
   hparmas.add_hparams("num_rnn_layers", 2)
+
+  hparmas.add_hparams("attn_dim", 512)
+  hparmas.add_hparams("num_glimps", 2)
+
