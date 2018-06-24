@@ -21,14 +21,20 @@ class AttentionBaseline(t2t_model.T2TModel):
 
   def body(self, features):
     hp = self.hparams
-    image_feat = image_embdding(features["inputs"],
-                                trainable=hp.train_resnet,
-                                is_training= hp.mode==tf.estimator.ModeKeys.TRAIN)
+    image_feat = image_embedding(features["inputs"],
+                                 trainable=hp.train_resnet,
+                                 is_training=hp.mode==tf.estimator.ModeKeys.TRAIN)
 
-    query = question_encoder(features["question"], hp)
+    # apply layer normalization and dropout on image_feature and question embedding
+    image_feat = common_layers.postprocess(image_feat, hp)
+    question = tf.nn.dropout(features["question"], 1. - hp.dropout)
+
+    query = question_encoder(question, hp)
     image_ave = attn(image_feat, query, hp)
 
     image_question = tf.concatenate([image_ave, query], axis=1)
+    image_question = tf.nn.dropout(image_question, 1. - hp.dropout)
+
     output = mlp(image_question, hp)
 
     return output
@@ -143,11 +149,18 @@ def mlp(feature, hparams, name="mlp"):
 def vqa_attention_base():
   hparams = common_hparams.basic_hparams1()
   hparams.dropout = 0.5
+  hparmas.norm_type = "layer"
+  hparams.layer_postprocess_sequence = "nd"
+  hparams.layer_prepostprocess_dropout = 0.5
 
   # add new hparams
+  hparmas.add_hparams("train_resnet", False)
   hparmas.add_hparams("rnn_type", "lstm_layernorm")
   hparmas.add_hparams("num_rnn_layers", 2)
 
   hparmas.add_hparams("attn_dim", 512)
   hparmas.add_hparams("num_glimps", 2)
+
+  hparmas.add_hparams("num_mlp_layers", 1)
+  hparmas.add_hparams("mlp_dim", 1024)
 
