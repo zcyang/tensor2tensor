@@ -165,6 +165,8 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
                         (registry.Modalities.IMAGE, 256),
                         "question":
                         (registry.Modalities.SYMBOL, encoder.vocab_size)}
+    p.target_modality = (registry.Modalities.CLASS_LABEL + ":multi_label",
+                         self.num_classes)
     # TODO(zichaoy): set batch_size multiplier, loss multiplier ?
     p.input_space_id = problem.SpaceID.IMAGE  # multiple input features?
     p.target_space_id = self.target_space_id

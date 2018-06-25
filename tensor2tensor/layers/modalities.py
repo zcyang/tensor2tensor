@@ -695,6 +695,30 @@ class ClassLabelModality(modality.Modality):
       res = tf.layers.dense(x, self._vocab_size)
       return tf.expand_dims(res, 3)
 
+@registry.register_class_label_modality("multi_label")
+class MultiLabelModality(ClassLabelModality):
+  """Compute loss for multi label."""
+  def targets_weights_fn(self):
+    weights_fn = common_layers.weights_nonzero
+    return weights_fn
+
+  def loss(self, top_out, targets):
+    logits = top_out
+    num_labels = tf.shape(targets)[1]
+    logits = tf.tile(logits, [1, num_labels, 1, 1])
+    
+    xent, weights = common_layers.padded_cross_entropy(
+      logits,
+      targets,
+      self._model_hparams.label_smoothing,
+      weights_fn=self.targets_weights_fn,
+    )
+    xent = tf.squeeze(xent, [2, 3])
+    weights = tf.squeeze(xent, [2, 3])
+    # average loss over all labels
+    loss = (tf.reduce_sum(xent, axis=1)
+            / (tf.reduce_sum(weights, axis=1) + 1e-8))
+    return tf.reduce_mean(loss)
 
 @registry.register_class_label_modality("onehot")
 class OneHotClassLabelModality(ClassLabelModality):

@@ -37,7 +37,11 @@ class AttentionBaseline(t2t_model.T2TModel):
 
     output = mlp(image_question, hp)
 
-    return output
+    # Expand dimension 1 and 2
+    return tf.expand_dims(tf.expand_dims(output, axis=1), axis=2)
+
+
+  def infer(self, )
 
 def image_embedding(images,
                     model_fn=resnet_v2_152,
