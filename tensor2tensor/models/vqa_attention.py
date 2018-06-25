@@ -41,7 +41,25 @@ class AttentionBaseline(t2t_model.T2TModel):
     return tf.expand_dims(tf.expand_dims(output, axis=1), axis=2)
 
 
-  def infer(self, )
+  def infer(self,
+            features,
+            decode_length=1,
+            beam_size=1,
+            top_beams=1,
+            alpha=0.0,
+            use_tpu=False):
+    "Predict."
+    del decode_length, beam_size, top_beams, alpha, use_tpu
+    assert features is not None
+    logits, _ = self(features)
+    assert len(logits.get_shape()) == 5
+    logits = tf.squeeze(logits, [1, 2, 3])
+    log_probs = common_layers.log_prob_from_logits(logits)
+    predictions, scores = common_layers.argmax_with_score(log_probs)
+    return {
+      "outputs": predictions,
+      "scores": scores,
+    }
 
 def image_embedding(images,
                     model_fn=resnet_v2_152,
