@@ -4,7 +4,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import io
 import json
 import os
 import random
@@ -24,7 +23,8 @@ _MSCOCO_ROOT_URL = "http://msvocds.blob.core.windows.net/"
 _MSCOCO_IMAGE_URLS = [
     "coco2014/train2014.zip", "coco2014/val2014.zip", "coco2014/test2014.zip",
 ]
-_VQA_V2_ANNOTATION_URL = "xxx"  # TODO(zichaoy) to be filled
+_VQA_V2_ANNOTATION_URL = ("https://drive.google.com/uc?export=download&id="
+                          "1xfMU54ObCLvMRAekT3cfcIg-AgY39fWB")
 
 
 def _get_vqa_v2_dataset(directory):
@@ -37,7 +37,7 @@ def _get_vqa_v2_dataset(directory):
     if not tf.gfile.Exists(unzip_dir):
       zipfile.ZipFile(path, "r").extractall(directory)
 
-  annotation_file = generator_utils.maybe_download_drom_drive(
+  annotation_file = generator_utils.maybe_download_from_drive(
       directory, "vqa_v2.tar.gz", _VQA_V2_ANNOTATION_URL)
   with tarfile.open(annotation_file, "r:gz") as annotation_tar:
     annotation_tar.extractall(directory)
@@ -50,7 +50,7 @@ def vqa_v2_generator(data_dir,
                      label_filename,
                      eos_list=None):
   """vqa v2 generator."""
-  eos_list = [1] if eos_list is None else eos_list
+  eos_list = eos_list if eos_list else []
   _get_vqa_v2_dataset(tmp_dir)
   vocab_path = os.path.join(data_dir, vocab_filename)
   if not tf.gfile.Exists(vocab_path):
@@ -65,27 +65,33 @@ def vqa_v2_generator(data_dir,
     label_tmp_path = os.path.join(tmp_dir, label_filename)
     tf.gfile.Copy(label_tmp_path, label_path)
 
-  vocab_encoder = text_encoder.TokenTextEncoder(vocab_path)
-  label_encoder = text_encoder.ClassLabelEncoder(label_path)
+  vocab_encoder = text_encoder.TokenTextEncoder(vocab_path, replace_oov="UNK")
+  label_encoder = text_encoder.ClassLabelEncoder(class_labels_fname=label_path)
 
-  prefix, annotation_file = datasets
-  annotation_json = json.load(io.open(annotation_file))
-  random.shuffle(annotation_json)
-  annotation_count = len(annotation_json)
+  prefix_annotation = []
+  for prefix, annotation_file in datasets:
+    annotation_path = os.path.join(tmp_dir, annotation_file)
+    with tf.gfile.Open(annotation_path) as f:
+      annotation_json = json.loads(f.read())
+    prefix_annotation += [(prefix, anno) for anno in annotation_json]
+  random.shuffle(prefix_annotation)
+  annotation_count = len(prefix_annotation)
   tf.logging.info("Processing %d annotations for vqa v2" %(annotation_count))
-  for image in annotation_json:
-    image_id = image["image_id"]
-    question = vocab_encoder.encode(image["question"]) + eos_list
-    answer = [label_encoder.encode(ans) for ans in image["answer"]]
-    image_filename = "COCO_" + prefix + str(image_id).zfill(12) + ".jpg"
+
+  for prefix, anno in prefix_annotation:
+    image_id = anno["image_id"]
+    question = vocab_encoder.encode(anno["question"]) + eos_list
+    answer = [label_encoder.encode(ans) for ans in anno["answer"]]
+    answer = answer if answer else [0]  # 0 indicates padding
+    image_filename = "COCO_" + prefix + "_" + str(image_id).zfill(12) + ".jpg"
     image_filepath = os.path.join(tmp_dir, prefix, image_filename)
-    with tf.gfile.OPen(image_filepath, "r") as f:
+    with tf.gfile.Open(image_filepath, "r") as f:
       encoded_image_data = f.read()
       yield {
           "image/encoded": [encoded_image_data],
           "image/format": ["jpeg"],
           "image/image_id": [image_id],
-          "image/question_id": [image["question_id"]],
+          "image/question_id": [anno["question_id"]],
           "image/question": question,
           "image/answer": answer,
       }
@@ -136,8 +142,6 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
     data_fields["image/question_id"] = tf.FixedLenFeature((), tf.int64)
     data_fields["image/question"] = tf.FixedLenSequenceFeature((), tf.int64)
     data_fields["image/answer"] = tf.FixedLenSequenceFeature((), tf.int64)
-    # TODO(zichaoy): maybe add answer len?
-    # depends on the implementation of multiclass modality
 
     data_items_to_decoders[
         "question"] = tf.contrib.slim.tf.example_decoder.Tensor(
@@ -150,7 +154,8 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
   def feature_encoders(self, data_dir):
     input_encoder = text_encoder.ImageEncoder(channels=self.num_channels)
     vocab_file = os.path.join(data_dir, self.vocab_filename)
-    question_encoder = text_encoder.TextTokenEncoder(vocab_file)
+    question_encoder = text_encoder.TokenTextEncoder(
+        vocab_file, replace_oov="UNK")
     label_file = os.path.join(data_dir, self.label_filename)
     target_encoder = text_encoder.ClassLabelEncoder(
         class_labels_fname=label_file)
@@ -183,13 +188,13 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
 class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
   """VQA V2, 10k question vocab, 3k answer label."""
   _VQA_V2_TRAIN_DATASETS = [
-      [("train2014", "train2014_annotations.json")]
+      ("train2014", "v2_train2014_annotations.json"),
   ]
   _VQA_V2_DEV_DATASETS = [
-      [("val2014", "val2014_annotations.json")]
+      ("val2014", "v2_val2014_annotations.json"),
   ]
   _VQA_V2_TEST_DATASETS = [
-      [("test2014", "test2014_annotations.json")]
+      ("test2015", "v2_test2015_annotations.json"),
   ]
 
   def source_data_files(self, dataset_split):
@@ -208,8 +213,8 @@ class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
     return 3000
 
   @property
-  def vocab_fileame(self):
-    return "question.vocab.%d" % self.question_vocab_size
+  def vocab_filename(self):
+    return "question.vocab.%d" % self.vocab_size
 
   @property
   def label_filename(self):
@@ -217,11 +222,11 @@ class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
 
   @property
   def train_shards(self):
-    return 100
+    return 128
 
   @property
   def dev_shards(self):
-    return 1
+    return 64
 
   def preprocess_example(self, example, mode, hparams):
     # TODO(zichaoy) hparams? problem_hparams or model hparmas??

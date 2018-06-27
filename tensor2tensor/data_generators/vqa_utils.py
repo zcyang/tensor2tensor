@@ -6,7 +6,7 @@ from __future__ import print_function
 
 import tensorflow as tf
 
-from tensorflow.python.ops import control_flow_ops
+from google3.third_party.tensorflow.python.ops import control_flow_ops
 
 # some functions are copied and modified from
 # vgg_preprocessing and inception_preprocessing in
