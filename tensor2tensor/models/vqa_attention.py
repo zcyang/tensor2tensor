@@ -4,24 +4,36 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import pdb
 
 from tensor2tensor.layers import common_attention
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
 from tensor2tensor.utils import registry
+from tensor2tensor.utils import restore_hook
 from tensor2tensor.utils import t2t_model
 
 import tensorflow as tf
-import tensorflow.contrib.slim as slim
 
 # pylint: disable=unused-import
-from tensorflow.contrib.slim.python.slim.nets.resnet_v1 import resnet_v1_152
-from tensorflow.contrib.slim.python.slim.nets.resnet_v2 import resnet_v2_152
+from google3.third_party.tensorflow.contrib import slim
+from google3.third_party.tensorflow.contrib.slim.python.slim.nets.resnet_v1 import resnet_v1_152
+from google3.third_party.tensorflow.contrib.slim.python.slim.nets.resnet_v2 import resnet_v2_152
 
 
 @registry.register_model
 class VqaAttentionBaseline(t2t_model.T2TModel):
   """Attention baseline model for VQA."""
+
+  @staticmethod
+  def train_hooks():
+    restore_resnet_hook = restore_hook.RestoreHook(
+        # TODO(zichaoy): hard code the path given static function.
+        checkpoint_path="/cns/lu-d/home/zichaoy/rs=6.3/resnet_v2_152.ckpt",
+        new_model_scope="vqa_attention_baseline/body/",
+        old_model_scope="resnet_v2_152/",
+    )
+    return [restore_resnet_hook]
 
   def body(self, features):
     hp = self.hparams
@@ -31,14 +43,14 @@ class VqaAttentionBaseline(t2t_model.T2TModel):
         is_training=hp.mode == tf.estimator.ModeKeys.TRAIN)
 
     # apply layer normalization and dropout on image_feature
-    image_feat = common_layers.postprocess(image_feat, hp)
+    image_feat = common_layers.layer_postprocess(None, image_feat, hp)
     # apply dropout on question embedding
     question = tf.nn.dropout(features["question"], 1. - hp.dropout)
 
     query = question_encoder(question, hp)
     image_ave = attn(image_feat, query, hp)
 
-    image_question = tf.concatenate([image_ave, query], axis=1)
+    image_question = tf.concat([image_ave, query], axis=1)
     image_question = tf.nn.dropout(image_question, 1. - hp.dropout)
 
     output = mlp(image_question, hp)
@@ -135,14 +147,35 @@ def question_encoder(question, hparams, name="encoder"):
     padding = common_attention.embedding_to_padding(question)
     length = common_attention.padding_to_length(padding)
 
-    rnn_layers = [_get_rnn_cell(hparams)
-                  for _ in range(hparams.num_rnn_layers)]
-    rnn_multi_cell = tf.contrib.rnn.MultiRNNCell(rnn_layers)
-    outputs, _ = tf.nn.dynamic_rnn(rnn_multi_cell, question, length)
+    max_question_length = hparams.max_question_length
+    question = question[:, :max_question_length, :]
+    actual_question_length = common_layers.shape_list(question)[1]
+    length = tf.minimum(length, max_question_length)
+    padding = [[0, 0],
+               [0, max_question_length-actual_question_length],
+               [0, 0]]
+    question = tf.pad(question, padding)
+    question_shape = question.get_shape().as_list()
+    question_shape[1] = max_question_length
+    question.set_shape(question_shape)
+
+    question = [question[:, i, :] for i in range(max_question_length)]
+
+    # rnn_layers = [_get_rnn_cell(hparams)
+    #               for _ in range(hparams.num_rnn_layers)]
+    # rnn_multi_cell = tf.contrib.rnn.MultiRNNCell(rnn_layers)
+    rnn_cell = _get_rnn_cell(hparams)
+    # outputs, _ = tf.nn.dynamic_rnn(
+    #     rnn_cell, question, length, dtype=tf.float32)
+    outputs, _ = tf.nn.static_rnn(rnn_cell, question, sequence_length=length,
+                                  dtype=tf.float32)
+    outputs = [tf.expand_dims(output, axis=1) for output in outputs]
+    outputs = tf.concat(outputs, axis=1)
 
     batch_size = common_layers.shape_list(outputs)[0]
     row_indices = tf.range(batch_size)
-    indices = tf.transpose([row_indices, length])
+    # length - 1 as index
+    indices = tf.transpose([row_indices, tf.maximum(length-1, 0)])
     last_output = tf.gather_nd(outputs, indices)
 
   return last_output
@@ -153,7 +186,7 @@ def attn(image_feat, query, hparams, name="attn"):
   with tf.variable_scope(name, "attn", values=[image_feat, query]):
     attn_dim = hparams.attn_dim
     num_glimps = hparams.num_glimps
-    batch_size, _, _, num_channels = image_feat.get_shape().as_list()
+    num_channels = common_layers.shape_list(image_feat)[-1]
     image_feat = common_layers.flatten4d3d(image_feat)
     query = tf.expand_dims(query, 1)
     image_proj = common_attention.compute_attention_component(
@@ -163,9 +196,9 @@ def attn(image_feat, query, hparams, name="attn"):
     h = tf.nn.relu(image_proj + query_proj)
     h_proj = common_attention.compute_attention_component(
         h, num_glimps, name="h_proj")
-    p = tf.nn.softmax(h_proj, dim=1)
+    p = tf.nn.softmax(h_proj, axis=1)
     image_ave = tf.matmul(image_feat, p, transpose_a=True)
-    image_ave = tf.reshape(image_ave, [batch_size, num_channels*num_glimps])
+    image_ave = tf.reshape(image_ave, [-1, num_channels*num_glimps])
 
     return image_ave
 
@@ -173,10 +206,10 @@ def attn(image_feat, query, hparams, name="attn"):
 def mlp(feature, hparams, name="mlp"):
   """Multi layer perceptron with dropout and relu activation."""
   with tf.variable_scope(name, "mlp", values=[feature]):
-    num_mlp_layer = hparams.num_mlp_layer
+    num_mlp_layers = hparams.num_mlp_layers
     mlp_dim = hparams.mlp_dim
-    for i in range(num_mlp_layer):
-      feature = common_layers.dense(feature, mlp_dim, activation=tf.relu)
+    for i in range(num_mlp_layers):
+      feature = common_layers.dense(feature, mlp_dim, activation=tf.nn.relu)
       feature = common_layers.dropout_with_broadcast_dims(
           feature, keep_prob=1-hparams.dropout, name="layer_%i"%(i))
     return feature
@@ -185,21 +218,51 @@ def mlp(feature, hparams, name="mlp"):
 @registry.register_hparams
 def vqa_attention_base():
   """VQA attention baseline hparams."""
-  hparams = common_hparams.basic_hparams1()
+  hparams = common_hparams.basic_params1()
+  hparams.batch_size = 2
+  hparams.use_fixed_batch_size = True,
+  hparams.optimizer = "Adam"
+  hparams.optimizer_adam_beta1 = 0.9
+  hparams.optimizer_adam_beta2 = 0.999
+  hparams.optimizer_adam_epsilon = 1e-8
+  hparams.weight_decay = 0
+  hparams.clip_grad_norm = 0.
+  hparams.initializer = "uniform_unit_scaling"
+  hparams.initializer_gain = 2.
+  hparams.learning_rate = 0.5
+  hparams.learning_rate_schedule = "legacy"
+  hparams.learning_rate_warmup_steps = 0
+  hparams.learning_rate_decay_scheme = "exp"
+  hparams.learning_rate_decay_rate = 0.5
+  hparams.learning_rate_decay_steps = 50000
+
+  # not used hparams
+  hparams.label_smoothing = 0.
+  hparams.multiply_embedding_mode = ""
+
   hparams.dropout = 0.5
   hparams.norm_type = "layer"
   hparams.layer_postprocess_sequence = "nd"
   hparams.layer_prepostprocess_dropout = 0.5
 
   # add new hparams
-  hparams.add_hparams("train_resnet", False)
-  hparams.add_hparams("rnn_type", "lstm_layernorm")
-  hparams.add_hparams("num_rnn_layers", 2)
+  # preprocess
+  hparams.add_hparam("resize_side", 512)
+  hparams.add_hparam("height", 448)
+  hparams.add_hparam("width", 448)
+  hparams.add_hparam("distort", True)
 
-  hparams.add_hparams("attn_dim", 512)
-  hparams.add_hparams("num_glimps", 2)
+  hparams.add_hparam("train_resnet", False)
+  hparams.add_hparam("rnn_type", "lstm")
+  hparams.add_hparam("num_rnn_layers", 1)
+  hparams.add_hparam("max_question_length", 15)
+  # lstm hidden size
+  hparams.hidden_size = 512
 
-  hparams.add_hparams("num_mlp_layers", 1)
-  hparams.add_hparams("mlp_dim", 1024)
+  hparams.add_hparam("attn_dim", 512)
+  hparams.add_hparam("num_glimps", 2)
+
+  hparams.add_hparam("num_mlp_layers", 1)
+  hparams.add_hparam("mlp_dim", 1024)
 
   return hparams

@@ -10,11 +10,13 @@ import random
 import tarfile
 import zipfile
 
+
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import image_utils
 from tensor2tensor.data_generators import problem
 from tensor2tensor.data_generators import text_encoder
 from tensor2tensor.google.data_generators import vqa_utils
+from tensor2tensor.utils import metrics
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
@@ -101,10 +103,6 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
   """Base class for image question answer problem."""
 
   @property
-  def source_data_files(self, dataset_split):
-    raise NotImplementedError()
-
-  @property
   def target_space_id(self):
     raise NotImplementedError()
 
@@ -132,19 +130,29 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
   def dev_shards(self):
     raise NotImplementedError()
 
+  def source_data_files(self, dataset_split):
+    raise NotImplementedError()
+
   def generator(self, data_dir, tmp_dir, dataset_split):
     raise NotImplementedError()
 
+  def eval_metrics(self):
+    return [
+        metrics.Metrics.ACC_MULTILABEL_MATCH3,
+    ]
+
   def example_reading_spec(self):
     data_fields, data_items_to_decoders = (
-        super(image_utils.ImageProblem, self).example_reading_spec())
+        super(ImageQuestion2MultilabelProblem, self).example_reading_spec())
     data_fields["image/image_id"] = tf.FixedLenFeature((), tf.int64)
     data_fields["image/question_id"] = tf.FixedLenFeature((), tf.int64)
-    data_fields["image/question"] = tf.FixedLenSequenceFeature((), tf.int64)
-    data_fields["image/answer"] = tf.FixedLenSequenceFeature((), tf.int64)
+    data_fields["image/question"] = tf.FixedLenSequenceFeature(
+        (), tf.int64, allow_missing=True)
+    data_fields["image/answer"] = tf.FixedLenSequenceFeature(
+        (), tf.int64, allow_missing=True)
 
     data_items_to_decoders[
-        "question"] = tf.contrib.slim.tf.example_decoder.Tensor(
+        "question"] = tf.contrib.slim.tfexample_decoder.Tensor(
             "image/question")
     data_items_to_decoders[
         "targets"] = tf.contrib.slim.tfexample_decoder.Tensor(
@@ -167,12 +175,11 @@ class ImageQuestion2MultilabelProblem(image_utils.ImageProblem):
     p = defaults
     encoder = self._encoders["question"]
     p.input_modality = {"inputs":
-                        (registry.Modalities.IMAGE, 256),
+                        (registry.Modalities.IMAGE, 448),
                         "question":
                         (registry.Modalities.SYMBOL, encoder.vocab_size)}
     p.target_modality = (registry.Modalities.CLASS_LABEL + ":multi_label",
                          self.num_classes)
-    # TODO(zichaoy): set batch_size multiplier, loss multiplier ?
     p.input_space_id = problem.SpaceID.IMAGE  # multiple input features?
     p.target_space_id = self.target_space_id
 
@@ -201,6 +208,7 @@ class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
     train = dataset_split == problem.DatasetSplit.TRAIN
     return self._VQA_V2_TRAIN_DATASETS if train else self._VQA_V2_DEV_DATASETS
 
+  @property
   def target_space_id(self):
     return problem.SpaceID.GENERIC
 
@@ -229,10 +237,12 @@ class ImageVqav2Tokens10kLabels3k(ImageQuestion2MultilabelProblem):
     return 64
 
   def preprocess_example(self, example, mode, hparams):
-    # TODO(zichaoy) hparams? problem_hparams or model hparmas??
+    # hparams is model_hparams
     image = example["inputs"]
-    return vqa_utils.vqa_v2_preprocess_image(image, hparams.height,
-                                             hparams.width, mode)
+    example["inputs"] = vqa_utils.vqa_v2_preprocess_image(
+        image, hparams.height, hparams.width, mode,
+        resize_side=hparams.resize_side, distort=hparams.distort)
+    return example
 
   def generator(self, data_dir, tmp_dir, dataset_split):
     datasets = self.source_data_files(dataset_split)

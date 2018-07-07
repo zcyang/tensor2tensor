@@ -4,6 +4,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+
 import tensorflow as tf
 
 from google3.third_party.tensorflow.python.ops import control_flow_ops
@@ -161,9 +162,8 @@ def vqa_v2_preprocess_image(
 
   image = tf.clip_by_value(image, 0.0, 1.0)
 
-  image = _flip(image)
-
   if mode == tf.estimator.ModeKeys.TRAIN and distort:
+    image = _flip(image)
     num_distort_cases = 4
     # pylint: disable=unnecessary-lambda
     image = _apply_with_random_selector(
